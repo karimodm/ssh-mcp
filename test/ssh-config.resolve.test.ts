@@ -70,6 +70,24 @@ Host lb1a.host.linkorb.cloud
     expect(config.username).toBe('override');
   });
 
+  it('reuses target username when proxy jump entry omits user', async () => {
+    await writeConfig(`Host spaces-k3s1
+  User andreavilla
+  HostName 10.44.1.11
+  ProxyJump lb5a.host.linkorb.cloud
+
+Host lb5a.host.linkorb.cloud
+  HostName bastion.lb5a.internal
+`);
+
+    const config = await resolveSshConfig({ host: 'spaces-k3s1', password: 'pw' });
+
+    expect(config.proxyJump).toBeDefined();
+    expect(config.proxyJump?.username).toBe('andreavilla');
+    expect(config.proxyJump?.host).toBe('bastion.lb5a.internal');
+    expect(config.proxyJump?.port).toBe(22);
+  });
+
   it('throws for nested ProxyJump directives', async () => {
     await writeConfig(`Host app
   User appuser

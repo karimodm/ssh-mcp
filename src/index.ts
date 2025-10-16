@@ -475,7 +475,7 @@ function parseProxyJumpSpec(spec: string): { host: string; username?: string; po
   };
 }
 
-async function deriveProxyJumpFromConfig(hostAlias: string, entry: any): Promise<ResolveProxyInput | undefined> {
+async function deriveProxyJumpFromConfig(hostAlias: string, entry: any, targetUsername: string): Promise<ResolveProxyInput | undefined> {
   const proxyJumpValue = getSshConfigValue(entry, 'ProxyJump');
   if (!proxyJumpValue) {
     return undefined;
@@ -541,12 +541,16 @@ async function deriveProxyJumpFromConfig(hostAlias: string, entry: any): Promise
       proxyInput.agent = resolveSshConfigPath(identityAgent, proxyHost, proxyUsername);
     }
 
+    if (!proxyInput.username) {
+      proxyInput.username = targetUsername;
+    }
+
     return proxyInput;
   }
 
   return {
     host: proxyHost,
-    username: proxyUsername,
+    username: proxyUsername ?? targetUsername,
     port: proxyPort,
   };
 }
@@ -707,7 +711,7 @@ export async function resolveSshConfig(input: ResolveConfigInput): Promise<Resol
   }
 
   const configProxyInput = sshConfigEntry
-    ? await deriveProxyJumpFromConfig(requestedHost, sshConfigEntry)
+    ? await deriveProxyJumpFromConfig(requestedHost, sshConfigEntry, username)
     : undefined;
   const mergedProxyInput = mergeProxyInputs(configProxyInput, input.proxyJump);
   const proxyJumpResolved = await resolveProxyConfig(mergedProxyInput);
