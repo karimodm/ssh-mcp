@@ -41,11 +41,21 @@
 
 ### Tools
 
-- `exec`: Execute a shell command on the remote server
+- `exec`: Execute a shell command on a remote server
   - **Parameters:**
     - `command` (required): Shell command to execute on the remote SSH server
+    - `host`: Remote hostname or IP. Required unless provided via `--host` CLI default.
+    - `port`: SSH port (default: 22 if neither tool input nor CLI default specified).
+    - `username`: SSH username. Required unless provided via `--user` CLI default.
+    - `password`: SSH password when using password authentication.
+    - `privateKey`: PEM-encoded private key contents (preferred when the LLM already has the key material).
+    - `privateKeyPath`: Path on the MCP server machine to a PEM-encoded private key (useful when the key resides locally alongside the server).
+    - `passphrase`: Passphrase for the provided private key, if needed.
+    - `agent`: Path to an SSH agent socket (for example the value of `SSH_AUTH_SOCK`) to authenticate using keys already loaded in the agent.
+    - `timeoutMs`: Override the per-command execution timeout in milliseconds (falls back to CLI `--timeout` or the 60000ms default).
+    - `reuseConnection`: Boolean flag (default `true`) to control whether the MCP server reuses a pooled SSH connection for the same host/user credentials.
   - **Timeout Configuration:**
-    - Timeout is configured via command line argument `--timeout` (in milliseconds)
+    - Timeout is configured via command line argument `--timeout` (in milliseconds) and can be overridden per call via `timeoutMs`.
     - Default timeout: 60000ms (1 minute)
     - When a command times out, the server automatically attempts to abort the running process before closing the connection
   - **Max Command Length Configuration:**
@@ -67,18 +77,19 @@
 
 ## Client Setup
 
-You can configure Claude Desktop to use this MCP Server.
+Configure your MCP client (Claude Desktop, Cursor, etc.) by adding the server definition to the `mcpServers` block. For Claude Desktop, edit `~/Library/Application Support/Claude/mcp.json` (macOS) or the corresponding location on Windows/Linux and insert:
 
-**Required Parameters:**
-- `host`: Hostname or IP of the Linux or Windows server
-- `user`: SSH username
-
-**Optional Parameters:**
+**CLI Defaults (optional):**
+- `host`: Hostname or IP to use as a default target. You can omit this to let the tool decide per request.
+- `user`: SSH username to use as a default. Required only if the tool input will not provide `username`.
 - `port`: SSH port (default: 22)
-- `password`: SSH password (or use `key` for key-based auth)
-- `key`: Path to private SSH key
+- `password`: SSH password (or use `key` / `privateKey` for key-based auth)
+- `key`: Path to a private SSH key stored alongside the MCP server
+- `agent`: Path to an SSH agent socket to use for authentication (defaults to the environment's `SSH_AUTH_SOCK` if provided)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
+
+At runtime, the `exec` tool can override any of these values per call by supplying `host`, `username`, `port`, `password`, `privateKey`, `privateKeyPath`, `agent`, `timeoutMs`, or `reuseConnection`.
 
 
 ```commandline
@@ -95,6 +106,7 @@ You can configure Claude Desktop to use this MCP Server.
                 "--user=root",
                 "--password=pass",
                 "--key=path/to/key",
+                "--agent=/run/user/1000/ssh-agent.sock",
                 "--timeout=30000",
                 "--maxChars=none"
             ]
@@ -102,6 +114,26 @@ You can configure Claude Desktop to use this MCP Server.
     }
 }
 ```
+
+For a locally modified checkout (e.g. this repo under `/tmp/ssh-mcp`), build it once with `npm run build` and point the MCP client directly at the compiled entry point:
+
+```commandline
+{
+    "mcpServers": {
+        "ssh-mcp": {
+            "command": "node",
+            "args": [
+                "/tmp/ssh-mcp/build/index.js",
+                "--agent=/run/user/1000/ssh-agent.sock",
+                "--timeout=30000",
+                "--maxChars=none"
+            ]
+        }
+    }
+}
+```
+
+If you prefer to choose the destination dynamically, you can omit `--host` (and even `--user`) from the CLI arguments and provide those fields in each `exec` tool call instead.
 
 ## Testing
 
