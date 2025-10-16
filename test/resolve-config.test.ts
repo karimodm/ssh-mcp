@@ -31,4 +31,35 @@ describe('resolveSshConfig validation', () => {
       resolveSshConfig({ ...baseInput, host: 'db.internal' })
     ).rejects.toThrow('Username must be provided');
   });
+
+  it('resolves proxy jump configuration when provided', async () => {
+    const config = await resolveSshConfig({
+      host: 'app.internal',
+      username: 'app',
+      password: 'target-secret',
+      proxyJump: {
+        host: 'bastion.internal',
+        username: 'bastion',
+        port: 2222,
+      },
+    });
+
+    expect(config.proxyJump).toBeDefined();
+    expect(config.proxyJump).toMatchObject({
+      host: 'bastion.internal',
+      port: 2222,
+      username: 'bastion',
+    });
+  });
+
+  it('rejects proxy host values that embed usernames', async () => {
+    await expect(
+      resolveSshConfig({
+        host: 'service.internal',
+        username: 'svc',
+        password: 'target-secret',
+        proxyJump: { host: 'bastion@proxy.internal', username: 'bastion' },
+      })
+    ).rejects.toThrow('Proxy host value');
+  });
 });

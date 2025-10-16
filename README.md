@@ -51,6 +51,7 @@
     - `privateKey`: PEM-encoded private key contents (preferred when the LLM already has the key material).
     - `privateKeyPath`: Path on the MCP server machine to a PEM-encoded private key (useful when the key resides locally alongside the server).
     - `passphrase`: Passphrase for the provided private key, if needed.
+    - `proxyJump`: Optional bastion definition with fields (`host`, `port`, `username`, `password`, `privateKey`, `privateKeyPath`, `passphrase`, `agent`) to relay through a proxy/jump host.
     - `agent`: Path to an SSH agent socket (for example the value of `SSH_AUTH_SOCK`) to authenticate using keys already loaded in the agent.
     - `timeoutMs`: Override the per-command execution timeout in milliseconds (falls back to CLI `--timeout` or the 60000ms default).
     - `reuseConnection`: Boolean flag (default `true`) to control whether the MCP server reuses a pooled SSH connection for the same host/user credentials.
@@ -86,11 +87,16 @@ Configure your MCP client (Claude Desktop, Cursor, etc.) by adding the server de
 - `password`: SSH password (or use `key` / `privateKey` for key-based auth)
 - `key`: Path to a private SSH key stored alongside the MCP server
 - `agent`: Path to an SSH agent socket to use for authentication (defaults to the environment's `SSH_AUTH_SOCK` if provided)
+- `proxyHost`: Hostname or IP of a bastion/jump server to route connections through.
+- `proxyPort`: SSH port for the proxy (default: 22)
+- `proxyUser`: SSH username for the proxy host (required when `proxyHost` is supplied)
+- `proxyKey`: Path to a private SSH key used for proxy authentication (optional when using SSH agent)
+- `proxyPassphrase`: Passphrase for the proxy private key, if required
 - `allowlist`: Path to a JSON file containing wildcard patterns for commands the server is allowed to execute (defaults to the bundled `config/command-allowlist.json`; can also be provided via the `SSH_MCP_ALLOWLIST` environment variable)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 
-At runtime, the `exec` tool can override any of these values per call by supplying `host`, `username`, `port`, `password`, `privateKey`, `privateKeyPath`, `agent`, `timeoutMs`, or `reuseConnection`.
+At runtime, the `exec` tool can override any of these values per call by supplying `host`, `username`, `port`, `password`, `privateKey`, `privateKeyPath`, `agent`, `proxyJump`, `timeoutMs`, or `reuseConnection`.
 
 
 ```commandline
@@ -108,6 +114,9 @@ At runtime, the `exec` tool can override any of these values per call by supplyi
                 "--password=pass",
                 "--key=path/to/key",
                 "--allowlist=/path/to/command-allowlist.json",
+                "--proxyHost=bastion.internal",
+                "--proxyPort=2222",
+                "--proxyUser=bastion",
                 "--agent=/run/user/1000/ssh-agent.sock",
                 "--timeout=30000",
                 "--maxChars=none"
@@ -127,6 +136,9 @@ For a locally modified checkout (e.g. this repo under `/tmp/ssh-mcp`), build it 
             "args": [
                 "/tmp/ssh-mcp/build/index.js",
                 "--allowlist=/tmp/ssh-mcp/config/command-allowlist.json",
+                "--proxyHost=bastion.internal",
+                "--proxyPort=2222",
+                "--proxyUser=bastion",
                 "--agent=/run/user/1000/ssh-agent.sock",
                 "--timeout=30000",
                 "--maxChars=none"
@@ -137,6 +149,10 @@ For a locally modified checkout (e.g. this repo under `/tmp/ssh-mcp`), build it 
 ```
 
 If you prefer to choose the destination dynamically, you can omit `--host` (and even `--user`) from the CLI arguments and provide those fields in each `exec` tool call instead.
+
+### Proxy / Bastion Support
+
+Provide `--proxyHost`, `--proxyPort`, and `--proxyUser` when starting the MCP server to route every connection through a fixed jump host. The server reuses the same SSH agent, password, or key material you supply for the proxy, and tool calls can optionally override those settings with the `proxyJump` object.
 
 ### Command Allowlist
 

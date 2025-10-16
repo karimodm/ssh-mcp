@@ -37,8 +37,23 @@ const DEFAULT_PORT = (() => {
 })();
 const DEFAULT_USERNAME = argvConfig.user;
 const DEFAULT_PASSWORD = argvConfig.password;
-const DEFAULT_KEY_PATH = argvConfig.key;
+const DEFAULT_KEY_PATH = argvConfig.key ? resolvePathFromCwd(argvConfig.key) : undefined;
 const DEFAULT_AGENT = argvConfig.agent;
+const DEFAULT_PROXY_HOST = argvConfig.proxyHost;
+const DEFAULT_PROXY_PORT = (() => {
+  if (typeof argvConfig.proxyPort === 'string') {
+    const parsed = parseInt(argvConfig.proxyPort, 10);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+})();
+const DEFAULT_PROXY_USERNAME = argvConfig.proxyUser;
+const DEFAULT_PROXY_PASSWORD = argvConfig.proxyPassword;
+const DEFAULT_PROXY_KEY_PATH = argvConfig.proxyKey ? resolvePathFromCwd(argvConfig.proxyKey) : undefined;
+const DEFAULT_PROXY_PASSPHRASE = argvConfig.proxyPassphrase;
+const DEFAULT_PROXY_AGENT = argvConfig.proxyAgent;
 const DEFAULT_TIMEOUT = (() => {
   if (typeof argvConfig.timeout === 'string') {
     const parsed = parseInt(argvConfig.timeout, 10);
@@ -49,6 +64,7 @@ const DEFAULT_TIMEOUT = (() => {
   return 60000; // 60 seconds default timeout
 })();
 let defaultPrivateKeyCache: string | null | undefined;
+let defaultProxyPrivateKeyCache: string | null | undefined;
 
 const envAllowListPath = process.env.SSH_MCP_ALLOWLIST;
 
@@ -130,6 +146,7 @@ type ResolvedSshConfig = Omit<ConnectConfig, 'agent'> & {
   port: number;
   username: string;
   agent?: string;
+  proxyJump?: ResolvedProxyConfig | null;
 };
 
 type ResolveConfigInput = {
@@ -139,6 +156,28 @@ type ResolveConfigInput = {
   password?: string;
   privateKey?: string;
   privateKeyPath?: string;
+  passphrase?: string;
+  agent?: string;
+  proxyJump?: ResolveProxyInput;
+};
+
+type ResolveProxyInput = {
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  privateKey?: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+  agent?: string;
+};
+
+type ResolvedProxyConfig = {
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  privateKey?: string;
   passphrase?: string;
   agent?: string;
 };
@@ -169,9 +208,94 @@ async function loadDefaultPrivateKey(): Promise<string | null> {
     defaultPrivateKeyCache = null;
     throw new McpError(
       ErrorCode.InvalidParams,
-      `Unable to read default private key from path \"${DEFAULT_KEY_PATH}\": ${error?.message || error}`
+      `Unable to read default private key from path "${DEFAULT_KEY_PATH}": ${error?.message || error}`
     );
   }
+}
+
+async function loadDefaultProxyPrivateKey(): Promise<string | null> {
+  if (defaultProxyPrivateKeyCache !== undefined) {
+    return defaultProxyPrivateKeyCache;
+  }
+  if (!DEFAULT_PROXY_KEY_PATH) {
+    defaultProxyPrivateKeyCache = null;
+    return null;
+  }
+  try {
+    defaultProxyPrivateKeyCache = await readFile(DEFAULT_PROXY_KEY_PATH, 'utf8');
+    return defaultProxyPrivateKeyCache;
+  } catch (error: any) {
+    defaultProxyPrivateKeyCache = null;
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `Unable to read default proxy private key from path "${DEFAULT_PROXY_KEY_PATH}": ${error?.message || error}`
+    );
+  }
+}
+
+async function resolveProxyConfig(input?: ResolveProxyInput): Promise<ResolvedProxyConfig | null> {
+  const candidateHost = input?.host ?? DEFAULT_PROXY_HOST;
+  if (!candidateHost) {
+    return null;
+  }
+
+  if (candidateHost.includes('@')) {
+    const segments = candidateHost.split('@');
+    if (segments.length >= 2) {
+      const suspectedUser = segments[0]?.trim();
+      const suspectedHost = segments.slice(1).join('@').trim();
+      if (suspectedUser && suspectedHost) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Proxy host value "${candidateHost}" appears to include a username. Provide the username via "proxyJump.username" (for example: "${suspectedUser}") and host as "${suspectedHost}".`
+        );
+      }
+    }
+  }
+
+  const portValue = input?.port ?? DEFAULT_PROXY_PORT;
+  const port = parseOptionalInteger(portValue as any, 'proxyJump.port', { min: 1, max: 65535 }) ?? 22;
+
+  const username = input?.username ?? DEFAULT_PROXY_USERNAME;
+  if (!username) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      'Proxy username must be provided via "proxyJump.username" or the --proxyUser CLI flag.'
+    );
+  }
+
+  const password = input?.password ?? DEFAULT_PROXY_PASSWORD;
+
+  let privateKey: string | null | undefined = input?.privateKey ?? null;
+  const privateKeyPath = input?.privateKeyPath
+    ? resolvePathFromCwd(input.privateKeyPath)
+    : DEFAULT_PROXY_KEY_PATH;
+
+  if (!privateKey && privateKeyPath) {
+    if (input?.privateKeyPath) {
+      privateKey = await readPrivateKeyFromPath(privateKeyPath);
+    } else {
+      privateKey = await loadDefaultProxyPrivateKey();
+    }
+  }
+
+  const passphrase = input?.passphrase ?? DEFAULT_PROXY_PASSPHRASE;
+  const agent = input?.agent ?? DEFAULT_PROXY_AGENT ?? DEFAULT_AGENT;
+
+  const resolvedPassword = password ?? undefined;
+  const resolvedPrivateKey = privateKey ?? undefined;
+  const resolvedPassphrase = passphrase ?? undefined;
+  const resolvedAgent = agent ?? undefined;
+
+  return {
+    host: candidateHost,
+    port,
+    username,
+    password: resolvedPassword,
+    privateKey: resolvedPrivateKey,
+    passphrase: resolvedPassphrase,
+    agent: resolvedAgent,
+  };
 }
 
 export async function resolveSshConfig(input: ResolveConfigInput): Promise<ResolvedSshConfig> {
@@ -243,6 +367,8 @@ export async function resolveSshConfig(input: ResolveConfigInput): Promise<Resol
   if (agent) {
     config.agent = agent;
   }
+
+  config.proxyJump = await resolveProxyConfig(input.proxyJump);
 
   return config;
 }
@@ -523,13 +649,22 @@ export function __setAllowListForTesting(patterns: string[] | null): void {
   allowListOverride = patterns.map((pattern) => compileAllowListPattern(pattern));
 }
 
-function credentialFingerprint(config: Pick<ResolvedSshConfig, 'password' | 'privateKey' | 'passphrase' | 'agent'>): string {
+function credentialFingerprint(config: Pick<ResolvedSshConfig, 'password' | 'privateKey' | 'passphrase' | 'agent' | 'proxyJump'> & { username: string; host: string; port: number }): string {
   const hash = createHash('sha256');
   hash.update(config.password ?? '');
   hash.update(config.privateKey ?? '');
   hash.update(config.passphrase ?? '');
   if (config.agent) {
     hash.update(config.agent);
+  }
+  if (config.proxyJump) {
+    hash.update(config.proxyJump.host);
+    hash.update(String(config.proxyJump.port));
+    hash.update(config.proxyJump.username);
+    hash.update(config.proxyJump.password ?? '');
+    hash.update(config.proxyJump.privateKey ?? '');
+    hash.update(config.proxyJump.passphrase ?? '');
+    hash.update(config.proxyJump.agent ?? '');
   }
   return hash.digest('hex');
 }
@@ -562,38 +697,119 @@ function parseOptionalInteger(
 // SSH Connection Manager to maintain persistent connection
 export class SSHConnectionManager {
   private conn: SSHClient | null = null;
+  private proxyConn: SSHClient | null = null;
   private sshConfig: ResolvedSshConfig;
+  private proxyConfig: ResolvedProxyConfig | null;
   private isConnecting = false;
   private connectionPromise: Promise<void> | null = null;
+  private isProxyConnecting = false;
+  private proxyConnectionPromise: Promise<void> | null = null;
 
   constructor(config: ResolvedSshConfig) {
     this.sshConfig = config;
+    this.proxyConfig = config.proxyJump ?? null;
+  }
+
+  private isProxyConnected(): boolean {
+    return this.proxyConn !== null && (this.proxyConn as any)._sock && !(this.proxyConn as any)._sock.destroyed;
+  }
+
+  private async ensureProxyConnected(): Promise<void> {
+    if (!this.proxyConfig) {
+      return;
+    }
+
+    if (this.proxyConn && this.isProxyConnected()) {
+      return;
+    }
+
+    if (this.isProxyConnecting && this.proxyConnectionPromise) {
+      await this.proxyConnectionPromise;
+      return;
+    }
+
+    this.isProxyConnecting = true;
+    this.proxyConnectionPromise = new Promise((resolve, reject) => {
+      const proxy = new SSHClient();
+      this.proxyConn = proxy;
+
+      const timeoutId = setTimeout(() => {
+        proxy.end();
+        this.proxyConn = null;
+        this.isProxyConnecting = false;
+        this.proxyConnectionPromise = null;
+        reject(new McpError(ErrorCode.InternalError, 'SSH proxy connection timeout'));
+      }, 30000);
+
+      proxy.on('ready', () => {
+        clearTimeout(timeoutId);
+        this.isProxyConnecting = false;
+        this.proxyConnectionPromise = null;
+        console.error('SSH proxy connection established');
+        resolve();
+      });
+
+      proxy.on('error', (err) => {
+        clearTimeout(timeoutId);
+        proxy.end();
+        this.proxyConn = null;
+        this.isProxyConnecting = false;
+        this.proxyConnectionPromise = null;
+        reject(new McpError(ErrorCode.InternalError, `SSH proxy connection error: ${err.message}`));
+      });
+
+      const handleProxyTermination = () => {
+        this.proxyConn = null;
+      };
+
+      proxy.on('end', handleProxyTermination);
+      proxy.on('close', handleProxyTermination);
+
+      const proxyConnectConfig: ConnectConfig = { ...this.proxyConfig! };
+      proxy.connect(proxyConnectConfig);
+    });
+
+    await this.proxyConnectionPromise;
+  }
+
+  private buildTargetConnectConfig(overrides: Partial<ConnectConfig> = {}): ConnectConfig {
+    const { proxyJump, ...rest } = this.sshConfig;
+    return { ...rest, ...overrides } as ConnectConfig;
   }
 
   async connect(): Promise<void> {
     if (this.conn && this.isConnected()) {
-      return; // Already connected
+      return;
     }
 
     if (this.isConnecting && this.connectionPromise) {
-      return this.connectionPromise; // Wait for ongoing connection
+      await this.connectionPromise;
+      return;
+    }
+
+    if (this.proxyConfig) {
+      await this.ensureProxyConnected();
     }
 
     this.isConnecting = true;
     this.connectionPromise = new Promise((resolve, reject) => {
       this.conn = new SSHClient();
-      
+
+      const cleanup = () => {
+        this.isConnecting = false;
+        this.connectionPromise = null;
+      };
+
       const timeoutId = setTimeout(() => {
         this.conn?.end();
         this.conn = null;
-        this.isConnecting = false;
-        this.connectionPromise = null;
+        cleanup();
         reject(new McpError(ErrorCode.InternalError, 'SSH connection timeout'));
-      }, 30000); // 30 seconds connection timeout
+      }, 30000);
 
       this.conn.on('ready', () => {
         clearTimeout(timeoutId);
-        this.isConnecting = false;
+        cleanup();
         console.error('SSH connection established');
         resolve();
       });
@@ -601,29 +817,50 @@ export class SSHConnectionManager {
       this.conn.on('error', (err) => {
         clearTimeout(timeoutId);
         this.conn = null;
-        this.isConnecting = false;
-        this.connectionPromise = null;
+        cleanup();
         reject(new McpError(ErrorCode.InternalError, `SSH connection error: ${err.message}`));
       });
 
-      this.conn.on('end', () => {
-        console.error('SSH connection ended');
-        this.conn = null;
-        this.isConnecting = false;
-        this.connectionPromise = null;
-      });
-
-      this.conn.on('close', () => {
+      const handleTermination = () => {
         console.error('SSH connection closed');
         this.conn = null;
-        this.isConnecting = false;
-        this.connectionPromise = null;
-      });
+      };
 
-      this.conn.connect(this.sshConfig);
+      this.conn.on('end', handleTermination);
+      this.conn.on('close', handleTermination);
+
+      const initiateConnection = (overrides: Partial<ConnectConfig> = {}) => {
+        const connectConfig = this.buildTargetConnectConfig(overrides);
+        if (overrides.sock) {
+          delete (connectConfig as any).host;
+          delete (connectConfig as any).port;
+        }
+        delete (connectConfig as any).proxyJump;
+        this.conn?.connect(connectConfig);
+      };
+
+      if (this.proxyConfig) {
+        if (!this.proxyConn) {
+          cleanup();
+          reject(new McpError(ErrorCode.InternalError, 'SSH proxy connection not available'));
+          return;
+        }
+        this.proxyConn.forwardOut('127.0.0.1', 0, this.sshConfig.host, this.sshConfig.port, (err, stream) => {
+          if (err) {
+            clearTimeout(timeoutId);
+            this.conn = null;
+            cleanup();
+            reject(new McpError(ErrorCode.InternalError, `SSH proxy forwarding error: ${err.message}`));
+            return;
+          }
+          initiateConnection({ sock: stream });
+        });
+      } else {
+        initiateConnection();
+      }
     });
 
-    return this.connectionPromise;
+    await this.connectionPromise;
   }
 
   isConnected(): boolean {
@@ -648,6 +885,14 @@ export class SSHConnectionManager {
       this.conn.end();
       this.conn = null;
     }
+    if (this.proxyConn) {
+      this.proxyConn.end();
+      this.proxyConn = null;
+    }
+    this.isConnecting = false;
+    this.connectionPromise = null;
+    this.isProxyConnecting = false;
+    this.proxyConnectionPromise = null;
   }
 }
 
@@ -659,7 +904,11 @@ type ManagerEntry = {
 const connectionManagers = new Map<string, ManagerEntry>();
 
 function getConnectionKey(config: ResolvedSshConfig): string {
-  return `${config.username}@${config.host}:${config.port}`;
+  let key = `${config.username}@${config.host}:${config.port}`;
+  if (config.proxyJump) {
+    key += `|proxy=${config.proxyJump.username}@${config.proxyJump.host}:${config.proxyJump.port}`;
+  }
+  return key;
 }
 
 function getOrCreateConnectionManager(config: ResolvedSshConfig): SSHConnectionManager {
@@ -711,6 +960,16 @@ server.tool(
     privateKeyPath: z.string().describe("Path on the MCP server to a PEM-encoded private key").optional(),
     passphrase: z.string().describe("Passphrase for the provided private key, if required").optional(),
     agent: z.string().describe("Path to an SSH agent socket (e.g., SSH_AUTH_SOCK)").optional(),
+    proxyJump: z.object({
+      host: z.string().min(1).describe("Hostname or IP address of the proxy (bastion) server").optional(),
+      port: z.union([z.number().int(), z.string().regex(/^\d+$/)]).describe("Port number for the proxy server").optional(),
+      username: z.string().min(1).describe("Username for proxy SSH authentication").optional(),
+      password: z.string().describe("Password for proxy SSH authentication").optional(),
+      privateKey: z.string().describe("PEM-encoded private key contents for proxy authentication").optional(),
+      privateKeyPath: z.string().describe("Path on the MCP server to a PEM-encoded private key for the proxy").optional(),
+      passphrase: z.string().describe("Passphrase for the proxy private key, if required").optional(),
+      agent: z.string().describe("Path to an SSH agent socket to use for the proxy").optional(),
+    }).partial().describe("Proxy (bastion) connection configuration").optional(),
     timeoutMs: z.union([z.number().int(), z.string().regex(/^\d+$/)]).describe("Execution timeout in milliseconds").optional(),
     reuseConnection: z.boolean().describe("Reuse a persistent SSH connection when available").optional(),
   },
@@ -725,6 +984,7 @@ server.tool(
       privateKeyPath,
       passphrase,
       agent,
+      proxyJump,
       timeoutMs,
       reuseConnection,
     } = input;
@@ -746,6 +1006,7 @@ server.tool(
         privateKeyPath,
         passphrase,
         agent,
+        proxyJump,
       });
 
       const effectiveTimeout = parsedTimeout ?? DEFAULT_TIMEOUT;
@@ -841,89 +1102,20 @@ export async function execSshCommandWithConnection(
 
 // Keep the old function for backward compatibility (used in tests)
 export async function execSshCommand(
-  sshConfig: any,
+  sshConfig: ResolvedSshConfig,
   command: string,
   timeoutMs: number = DEFAULT_TIMEOUT
 ): Promise<{ [x: string]: unknown; content: ({ [x: string]: unknown; type: "text"; text: string; } | { [x: string]: unknown; type: "image"; data: string; mimeType: string; } | { [x: string]: unknown; type: "audio"; data: string; mimeType: string; } | { [x: string]: unknown; type: "resource"; resource: any; })[] }> {
   const sanitizedCommand = sanitizeCommand(command);
   await ensureCommandAllowed(sanitizedCommand);
-  return new Promise((resolve, reject) => {
-    const conn = new SSHClient();
-    let timeoutId: NodeJS.Timeout;
-    let isResolved = false;
-    
-    // Set up timeout
-    timeoutId = setTimeout(() => {
-      if (!isResolved) {
-        isResolved = true;
-        // Try to abort the running command before closing connection
-        const abortTimeout = setTimeout(() => {
-          // If abort command itself times out, force close connection
-          conn.end();
-        }, 5000); // 5 second timeout for abort command
-        
-        conn.exec("timeout 3s pkill -f '" + escapeCommandForShell(sanitizedCommand) + "' 2>/dev/null || true", (err, abortStream) => {
-          if (abortStream) {
-            abortStream.on('close', () => {
-              clearTimeout(abortTimeout);
-              conn.end();
-            });
-          } else {
-            clearTimeout(abortTimeout);
-            conn.end();
-          }
-        });
-        reject(new McpError(ErrorCode.InternalError, `Command execution timed out after ${timeoutMs}ms`));
-      }
-    }, timeoutMs);
-    
-    conn.on('ready', () => {
-      conn.exec(sanitizedCommand, (err, stream) => {
-        if (err) {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            reject(new McpError(ErrorCode.InternalError, `SSH exec error: ${err.message}`));
-          }
-          conn.end();
-          return;
-        }
-        let stdout = '';
-        let stderr = '';
-        stream.on('close', (code: number, signal: string) => {
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            conn.end();
-            if (stderr) {
-              reject(new McpError(ErrorCode.InternalError, `Error (code ${code}):\n${stderr}`));
-            } else {
-              resolve({
-                content: [{
-                  type: 'text',
-                  text: stdout,
-                }],
-              });
-            }
-          }
-        });
-        stream.on('data', (data: Buffer) => {
-          stdout += data.toString();
-        });
-        stream.stderr.on('data', (data: Buffer) => {
-          stderr += data.toString();
-        });
-      });
-    });
-    conn.on('error', (err) => {
-      if (!isResolved) {
-        isResolved = true;
-        clearTimeout(timeoutId);
-        reject(new McpError(ErrorCode.InternalError, `SSH connection error: ${err.message}`));
-      }
-    });
-    conn.connect(sshConfig);
-  });
+
+  const manager = new SSHConnectionManager(sshConfig);
+  try {
+    await manager.ensureConnected();
+    return await execSshCommandWithConnection(manager, sanitizedCommand, timeoutMs);
+  } finally {
+    manager.close();
+  }
 }
 
 async function main() {

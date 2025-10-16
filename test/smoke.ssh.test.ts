@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { execSshCommand, sanitizeCommand } from '../src/index';
+import { execSshCommand, sanitizeCommand, resolveSshConfig } from '../src/index';
+
+process.env.SSH_MCP_DISABLE_MAIN = '1';
 
 const host = process.env.SSH_HOST || '127.0.0.1';
 const port = Number(process.env.SSH_PORT || 2222);
@@ -8,7 +10,8 @@ const password = process.env.SSH_PASSWORD || 'secret';
 
 describe('ssh smoke', () => {
   it('executes echo ok', async () => {
-    const result: any = await execSshCommand({ host, port, username, password }, 'echo ok');
+    const sshConfig = await resolveSshConfig({ host, port, username, password });
+    const result: any = await execSshCommand(sshConfig, 'echo ok');
     expect(result.content[0]).toEqual({ type: 'text', text: 'ok\n' });
   }, 20000);
 });
@@ -52,5 +55,4 @@ describe('maxChars configuration', () => {
     });
   });
 });
-
 
