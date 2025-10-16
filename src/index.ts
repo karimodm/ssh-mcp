@@ -10,6 +10,8 @@ import { createServer } from 'http';
 import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import path from 'path';
+import os from 'os';
+import { parse as parseSshConfig } from 'ssh-config';
 import { fileURLToPath } from 'url';
 
 // Example usage: node build/index.js --host=1.2.3.4 --port=22 --user=root --password=pass --key=path/to/key --timeout=5000
@@ -95,6 +97,9 @@ const DEFAULT_TIMEOUT = (() => {
 })();
 let defaultPrivateKeyCache: string | null | undefined;
 let defaultProxyPrivateKeyCache: string | null | undefined;
+let sshConfigCache: any | null | undefined;
+let sshConfigLoadPromise: Promise<any | null> | null = null;
+let sshConfigFilePath: string | null = null;
 
 const envAllowListPath = process.env.SSH_MCP_ALLOWLIST;
 
@@ -339,6 +344,219 @@ async function loadDefaultProxyPrivateKey(): Promise<string | null> {
   }
 }
 
+function mergeProxyInputs(base?: ResolveProxyInput, override?: ResolveProxyInput): ResolveProxyInput | undefined {
+  if (!base && !override) {
+    return undefined;
+  }
+  const merged: ResolveProxyInput = { ...(base ?? {}) };
+  if (override) {
+    for (const key of Object.keys(override) as (keyof ResolveProxyInput)[]) {
+      const value = override[key];
+      if (value !== undefined) {
+        (merged as any)[key] = value;
+      }
+    }
+  }
+  return merged;
+}
+
+async function loadSshConfig(): Promise<any | null> {
+  if (sshConfigCache !== undefined) {
+    return sshConfigCache;
+  }
+
+  if (!sshConfigLoadPromise) {
+    sshConfigLoadPromise = (async () => {
+      const overridePath = process.env.SSH_MCP_SSH_CONFIG_PATH;
+      const configPath = overridePath
+        ? (path.isAbsolute(overridePath) ? overridePath : path.resolve(process.cwd(), overridePath))
+        : path.join(os.homedir(), '.ssh', 'config');
+      try {
+        const content = await readFile(configPath, 'utf8');
+        sshConfigFilePath = configPath;
+        return parseSshConfig(content);
+      } catch (error: any) {
+        if (error?.code !== 'ENOENT') {
+          console.warn(`Unable to read SSH config at ${configPath}: ${error?.message || error}`);
+        }
+        return null;
+      }
+    })();
+  }
+
+  try {
+    sshConfigCache = await sshConfigLoadPromise;
+  } finally {
+    sshConfigLoadPromise = null;
+  }
+  return sshConfigCache;
+}
+
+async function getSshConfigEntry(host: string): Promise<any | null> {
+  const config = await loadSshConfig();
+  if (!config) {
+    return null;
+  }
+  try {
+    const entry = config.compute(host);
+    if (!entry) {
+      return null;
+    }
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function getSshConfigValue(entry: any, key: string): any {
+  if (!entry) {
+    return undefined;
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, key)) {
+    return entry[key];
+  }
+  const lowerKey = key.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(entry, lowerKey)) {
+    return entry[lowerKey];
+  }
+  const upperKey = key.toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(entry, upperKey)) {
+    return entry[upperKey];
+  }
+  return undefined;
+}
+
+function getFirstStringValue(entry: any, key: string): string | undefined {
+  const value = getSshConfigValue(entry, key);
+  if (Array.isArray(value)) {
+    return value.length ? String(value[0]) : undefined;
+  }
+  if (value !== undefined) {
+    return String(value);
+  }
+  return undefined;
+}
+
+function getStringArrayValue(entry: any, key: string): string[] {
+  const value = getSshConfigValue(entry, key);
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item));
+  }
+  return [String(value)];
+}
+
+function resolveSshConfigPath(value: string, host: string, username?: string): string {
+  let resolved = value.replace(/%h/g, host);
+  if (username) {
+    resolved = resolved.replace(/%u/g, username);
+  }
+  if (resolved.startsWith('~')) {
+    resolved = path.join(os.homedir(), resolved.slice(1));
+  } else if (!path.isAbsolute(resolved) && sshConfigFilePath && /[\\/]/.test(resolved)) {
+    resolved = path.resolve(path.dirname(sshConfigFilePath), resolved);
+  }
+  return resolved;
+}
+
+function parseProxyJumpSpec(spec: string): { host: string; username?: string; port?: number } {
+  const trimmed = spec.trim();
+  const match = trimmed.match(/^(?:(?<user>[^@]+)@)?(?<host>[^:@]+)(?::(?<port>\d+))?$/);
+  if (!match || !match.groups?.host) {
+    throw new McpError(ErrorCode.InvalidParams, `Unable to parse ProxyJump directive: "${spec}"`);
+  }
+  const port = match.groups.port ? parseInt(match.groups.port, 10) : undefined;
+  return {
+    host: match.groups.host,
+    username: match.groups.user || undefined,
+    port: Number.isFinite(port) ? port : undefined,
+  };
+}
+
+async function deriveProxyJumpFromConfig(hostAlias: string, entry: any): Promise<ResolveProxyInput | undefined> {
+  const proxyJumpValue = getSshConfigValue(entry, 'ProxyJump');
+  if (!proxyJumpValue) {
+    return undefined;
+  }
+  const valueList = Array.isArray(proxyJumpValue) ? proxyJumpValue : [proxyJumpValue];
+  const first = valueList.find((item: string) => typeof item === 'string' && item.trim().length > 0);
+  if (!first) {
+    return undefined;
+  }
+
+  const spec = String(first).split(',')[0]!.trim();
+  if (!spec) {
+    return undefined;
+  }
+
+  const parsed = parseProxyJumpSpec(spec);
+  let proxyHost = parsed.host;
+  let proxyUsername = parsed.username;
+  let proxyPort = parsed.port;
+
+  const proxyEntry = await getSshConfigEntry(proxyHost);
+  if (proxyEntry) {
+    const hostName = getFirstStringValue(proxyEntry, 'HostName');
+    if (hostName) {
+      proxyHost = hostName;
+    }
+    if (!proxyUsername) {
+      const proxyUser = getFirstStringValue(proxyEntry, 'User');
+      if (proxyUser) {
+        proxyUsername = proxyUser;
+      }
+    }
+    if (!proxyPort) {
+      const proxyPortValue = getFirstStringValue(proxyEntry, 'Port');
+      if (proxyPortValue) {
+        const parsedPort = parseInt(proxyPortValue, 10);
+        if (!Number.isNaN(parsedPort)) {
+          proxyPort = parsedPort;
+        }
+      }
+    }
+    const identityFiles = getStringArrayValue(proxyEntry, 'IdentityFile');
+    const identityFile = identityFiles.length ? identityFiles[0] : undefined;
+    const identityAgent = getFirstStringValue(proxyEntry, 'IdentityAgent');
+    if (getSshConfigValue(proxyEntry, 'ProxyJump')) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Nested ProxyJump directives are not supported (encountered for proxy host "${parsed.host}")`
+      );
+    }
+
+    const proxyInput: ResolveProxyInput = {
+      host: proxyHost,
+      username: proxyUsername,
+      port: proxyPort,
+    };
+
+    if (identityFile) {
+      proxyInput.privateKeyPath = resolveSshConfigPath(identityFile, proxyHost, proxyUsername);
+    }
+
+    if (identityAgent) {
+      proxyInput.agent = resolveSshConfigPath(identityAgent, proxyHost, proxyUsername);
+    }
+
+    return proxyInput;
+  }
+
+  return {
+    host: proxyHost,
+    username: proxyUsername,
+    port: proxyPort,
+  };
+}
+
+export function __resetSshConfigCacheForTesting(): void {
+  sshConfigCache = undefined;
+  sshConfigLoadPromise = null;
+  sshConfigFilePath = null;
+}
+
 async function resolveProxyConfig(input?: ResolveProxyInput): Promise<ResolvedProxyConfig | null> {
   const candidateHost = input?.host ?? DEFAULT_PROXY_HOST;
   if (!candidateHost) {
@@ -405,16 +623,16 @@ async function resolveProxyConfig(input?: ResolveProxyInput): Promise<ResolvedPr
 }
 
 export async function resolveSshConfig(input: ResolveConfigInput): Promise<ResolvedSshConfig> {
-  const host = input.host ?? DEFAULT_HOST;
-  if (!host) {
+  const requestedHost = input.host ?? DEFAULT_HOST;
+  if (!requestedHost) {
     throw new McpError(
       ErrorCode.InvalidParams,
       'Host must be provided either via tool input or --host'
     );
   }
 
-  if (host.includes('@')) {
-    const segments = host.split('@');
+  if (requestedHost.includes('@')) {
+    const segments = requestedHost.split('@');
     if (segments.length >= 2) {
       const suspectedUser = segments[0]?.trim();
       const suspectedHost = segments.slice(1).join('@').trim();
@@ -425,13 +643,19 @@ export async function resolveSshConfig(input: ResolveConfigInput): Promise<Resol
           : `Provide the username using the "username" parameter (for example: "${suspectedUser}") and set "host" to "${suspectedHost}".`;
         throw new McpError(
           ErrorCode.InvalidParams,
-          `Host value "${host}" appears to include a username. ${hint}`
+          `Host value "${requestedHost}" appears to include a username. ${hint}`
         );
       }
     }
   }
 
-  const username = input.username ?? DEFAULT_USERNAME;
+  const sshConfigEntry = await getSshConfigEntry(requestedHost);
+  const configHostName = getFirstStringValue(sshConfigEntry, 'HostName');
+
+  let host = configHostName ?? requestedHost;
+
+  const configUser = getFirstStringValue(sshConfigEntry, 'User');
+  let username = input.username ?? configUser ?? DEFAULT_USERNAME;
   if (!username) {
     throw new McpError(
       ErrorCode.InvalidParams,
@@ -439,21 +663,23 @@ export async function resolveSshConfig(input: ResolveConfigInput): Promise<Resol
     );
   }
 
-  const port = input.port ?? DEFAULT_PORT;
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new McpError(ErrorCode.InvalidParams, 'Port must be an integer between 1 and 65535');
-  }
+  const configPortValue = getFirstStringValue(sshConfigEntry, 'Port');
+  const rawPort = input.port ?? configPortValue ?? DEFAULT_PORT;
+  const port = parseOptionalInteger(rawPort as any, 'port', { min: 1, max: 65535 }) ?? 22;
 
-  const config: ResolvedSshConfig = { host, port, username };
+  let agent = input.agent ?? DEFAULT_AGENT;
+  if (!agent) {
+    const configAgent = getFirstStringValue(sshConfigEntry, 'IdentityAgent');
+    if (configAgent) {
+      agent = resolveSshConfigPath(configAgent, host, username);
+    }
+  }
 
   const password = input.password ?? DEFAULT_PASSWORD;
-  if (password) {
-    config.password = password;
-  }
 
-  let privateKey = input.privateKey;
+  let privateKey = input.privateKey ?? null;
   if (!privateKey && input.privateKeyPath) {
-    privateKey = await readPrivateKeyFromPath(input.privateKeyPath);
+    privateKey = await readPrivateKeyFromPath(resolvePathFromCwd(input.privateKeyPath));
   }
   if (!privateKey && !password) {
     const defaultKey = await loadDefaultPrivateKey();
@@ -461,20 +687,46 @@ export async function resolveSshConfig(input: ResolveConfigInput): Promise<Resol
       privateKey = defaultKey;
     }
   }
+  if (!privateKey && !password && sshConfigEntry) {
+    const identityFiles = getStringArrayValue(sshConfigEntry, 'IdentityFile');
+    for (const identity of identityFiles) {
+      const resolvedIdentityPath = resolveSshConfigPath(identity, host, username);
+      privateKey = await readPrivateKeyFromPath(resolvedIdentityPath);
+      break;
+    }
+  }
+
+  if (sshConfigEntry) {
+    const proxyCommand = getFirstStringValue(sshConfigEntry, 'ProxyCommand');
+    if (proxyCommand) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `ProxyCommand directives are not supported (encountered for host "${requestedHost}").`
+      );
+    }
+  }
+
+  const configProxyInput = sshConfigEntry
+    ? await deriveProxyJumpFromConfig(requestedHost, sshConfigEntry)
+    : undefined;
+  const mergedProxyInput = mergeProxyInputs(configProxyInput, input.proxyJump);
+  const proxyJumpResolved = await resolveProxyConfig(mergedProxyInput);
+
+  const config: ResolvedSshConfig = { host, port, username };
+
+  if (password) {
+    config.password = password;
+  }
   if (privateKey) {
     config.privateKey = privateKey;
   }
-
   if (input.passphrase) {
     config.passphrase = input.passphrase;
   }
-
-  const agent = input.agent ?? DEFAULT_AGENT;
   if (agent) {
     config.agent = agent;
   }
-
-  config.proxyJump = await resolveProxyConfig(input.proxyJump);
+  config.proxyJump = proxyJumpResolved ?? null;
 
   return config;
 }

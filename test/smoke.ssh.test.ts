@@ -8,7 +8,10 @@ const port = Number(process.env.SSH_PORT || 2222);
 const username = process.env.SSH_USER || 'test';
 const password = process.env.SSH_PASSWORD || 'secret';
 
-describe('ssh smoke', () => {
+const runLiveSsh = process.env.SSH_MCP_RUN_LIVE_SSH_TESTS === '1';
+const describeOrSkip = runLiveSsh ? describe : describe.skip;
+
+describeOrSkip('ssh smoke', () => {
   it('executes echo ok', async () => {
     const sshConfig = await resolveSshConfig({ host, port, username, password });
     const result: any = await execSshCommand(sshConfig, 'echo ok');
@@ -55,4 +58,3 @@ describe('maxChars configuration', () => {
     });
   });
 });
-

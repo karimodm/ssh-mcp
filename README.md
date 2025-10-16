@@ -169,6 +169,10 @@ Stdio remains the default transport, so existing MCP client configurations conti
 
 Provide `--proxyHost`, `--proxyPort`, and `--proxyUser` when starting the MCP server to route every connection through a fixed jump host. The server reuses the same SSH agent, password, or key material you supply for the proxy, and tool calls can optionally override those settings with the `proxyJump` object.
 
+### SSH Config Integration
+
+The server automatically loads the current user's `~/.ssh/config` (or a custom file via `SSH_MCP_SSH_CONFIG_PATH`) and applies matching `Host` entries. Attributes such as `HostName`, `User`, `Port`, `IdentityFile`, `IdentityAgent`, and `ProxyJump` are honoured unless you override them via CLI flags or per-call parameters. `ProxyCommand` directives are not yet supported and will raise an error if encountered. Use this to reuse existing bastion setups—define them once in SSH config, then let the MCP server resolve aliases and jump hosts transparently.
+
 ### Command Allowlist
 
 All commands executed through the MCP server must match one of the wildcard patterns defined in `config/command-allowlist.json` (or a custom file provided via `--allowlist` or the `SSH_MCP_ALLOWLIST` environment variable). The bundled list is seeded with a broad set of read-only diagnostics, including:
