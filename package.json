@@ -16,7 +16,8 @@
     "coverage": "cross-env SSH_MCP_DISABLE_MAIN=1 vitest --run --coverage"
   },
   "files": [
-    "build"
+    "build",
+    "config"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.5",

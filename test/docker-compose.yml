@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  sshd:
+    image: ghcr.io/linuxserver/openssh-server:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - PUBLIC_KEY=
+      - PASSWORD_ACCESS=true
+      - USER_NAME=test
+      - USER_PASSWORD=secret
+    ports:
+      - "2222:2222"
+    restart: unless-stopped

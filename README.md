@@ -81,11 +81,12 @@ Configure your MCP client (Claude Desktop, Cursor, etc.) by adding the server de
 
 **CLI Defaults (optional):**
 - `host`: Hostname or IP to use as a default target. You can omit this to let the tool decide per request.
-- `user`: SSH username to use as a default. Required only if the tool input will not provide `username`.
+- `user`: SSH username to use as a default. Required only if the tool input will not provide `username`. Do not embed the username in the `host` value (i.e. prefer `"host": "example.com"` alongside `"username": "ops"`).
 - `port`: SSH port (default: 22)
 - `password`: SSH password (or use `key` / `privateKey` for key-based auth)
 - `key`: Path to a private SSH key stored alongside the MCP server
 - `agent`: Path to an SSH agent socket to use for authentication (defaults to the environment's `SSH_AUTH_SOCK` if provided)
+- `allowlist`: Path to a JSON file containing wildcard patterns for commands the server is allowed to execute (defaults to the bundled `config/command-allowlist.json`; can also be provided via the `SSH_MCP_ALLOWLIST` environment variable)
 - `timeout`: Command execution timeout in milliseconds (default: 60000ms = 1 minute)
 - `maxChars`: Maximum allowed characters for the `command` input (default: 1000). Use `none` or `0` to disable the limit.
 
@@ -106,6 +107,7 @@ At runtime, the `exec` tool can override any of these values per call by supplyi
                 "--user=root",
                 "--password=pass",
                 "--key=path/to/key",
+                "--allowlist=/path/to/command-allowlist.json",
                 "--agent=/run/user/1000/ssh-agent.sock",
                 "--timeout=30000",
                 "--maxChars=none"
@@ -124,6 +126,7 @@ For a locally modified checkout (e.g. this repo under `/tmp/ssh-mcp`), build it 
             "command": "node",
             "args": [
                 "/tmp/ssh-mcp/build/index.js",
+                "--allowlist=/tmp/ssh-mcp/config/command-allowlist.json",
                 "--agent=/run/user/1000/ssh-agent.sock",
                 "--timeout=30000",
                 "--maxChars=none"
@@ -134,6 +137,22 @@ For a locally modified checkout (e.g. this repo under `/tmp/ssh-mcp`), build it 
 ```
 
 If you prefer to choose the destination dynamically, you can omit `--host` (and even `--user`) from the CLI arguments and provide those fields in each `exec` tool call instead.
+
+### Command Allowlist
+
+All commands executed through the MCP server must match one of the wildcard patterns defined in `config/command-allowlist.json` (or a custom file provided via `--allowlist` or the `SSH_MCP_ALLOWLIST` environment variable). The bundled list is seeded with a broad set of read-only diagnostics, including:
+
+- Network probes: `ping`, `traceroute`, `tracepath`, `mtr`, `dig`, `nslookup`, `host`, `whois`, `nc -vz`, `nmap -sn`, `socat -V`, `openssl s_client ...`, and `curl`/`wget` requests.
+- Container and cluster discovery: `docker` read-only commands (containers/images/networks/volumes/logs/events/stats), Docker Compose inspection, and Docker Swarm/stack/service/node/config/secret queries for fleet visibility.
+- Interface and routing introspection: `ip addr show`, `ip route show`, `ip neigh show`, `ifconfig -a`, `ethtool -i/-S`, `nmcli device show`, `ss -tuna`, `netstat -an`, `lsof -i`, `tcpdump -D`, `tshark -D`, `ipt(6)ables -L`, `firewall-cmd --list-all`, and `ufw status`.
+- System observability: `journalctl -n`, `dmesg -T`, `tail -n`, `head -n`, `cat`, `grep`, `rg`, `ls -la`, `stat`, `ps aux`, `top -b -n 1`, `df -h`, `free -h`, `vmstat`, `iostat`, `sar`, `env`, `printenv`, `systemctl status`, `timedatectl`, `resolvectl status`, `showmount -e`, `lsblk`, and more.
+
+Additional behavior:
+
+- Patterns support the `*` wildcard and are matched against commands after whitespace is normalized.
+- Command chaining via pipes (`|`), semicolons (`;`), logical operators (`&&`, `||`), backticks, `$()`, or redirection operators (`>`, `<`, `>>`, `<<`) is blocked even if the base command matches the allowlist, preventing command injection and write operations.
+- When a command is rejected, the error message includes the full allowlist so the LLM can choose a permitted alternative.
+- Update the JSON file to add or remove patterns as needed, then restart the MCP server so it reloads the configuration.
 
 ## Testing
 
