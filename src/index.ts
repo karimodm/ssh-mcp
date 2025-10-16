@@ -5,6 +5,8 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { Client as SSHClient, ConnectConfig } from 'ssh2';
 import { z } from 'zod';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createServer } from 'http';
 import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import path from 'path';
@@ -24,6 +26,34 @@ function parseArgv() {
 }
 const isCliEnabled = process.env.SSH_MCP_DISABLE_MAIN !== '1';
 const argvConfig = isCliEnabled ? parseArgv() : {} as Record<string, string>;
+
+function getArgValue(config: Record<string, string>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(config, key)) {
+      const value = config[key];
+      if (typeof value === 'string' && value.length > 0) {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function parseOptionalBoolean(value: string | undefined, fieldLabel: string): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  throw new Error(`${fieldLabel} must be one of: true, false, 1, 0, yes, no, on, off`);
+}
 
 const DEFAULT_HOST = argvConfig.host;
 const DEFAULT_PORT = (() => {
@@ -104,6 +134,41 @@ function validateConfig(config: Record<string, string>) {
   const errors: string[] = [];
   if (config.port && isNaN(Number(config.port))) errors.push('Invalid --port');
   if (config.timeout && isNaN(Number(config.timeout))) errors.push('Invalid --timeout');
+  const httpPortRaw = getArgValue(config, 'httpPort', 'http-port');
+  if (httpPortRaw !== undefined) {
+    const parsed = Number(httpPortRaw);
+    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+      errors.push('Invalid --httpPort (must be an integer between 1 and 65535)');
+    }
+  }
+
+  const transportRaw = getArgValue(config, 'transport', 'mode');
+  if (transportRaw) {
+    const normalized = transportRaw.toLowerCase();
+    if (normalized !== 'stdio' && normalized !== 'http') {
+      errors.push('Invalid --transport (expected "stdio" or "http")');
+    }
+  }
+
+  const booleanArgs: Array<{ key: string; label: string }> = [
+    { key: 'http', label: '--http' },
+    { key: 'httpEnabled', label: '--httpEnabled' },
+    { key: 'enableHttp', label: '--enableHttp' },
+    { key: 'disableStdio', label: '--disableStdio' },
+    { key: 'stdioDisabled', label: '--stdioDisabled' },
+    { key: 'noStdio', label: '--noStdio' },
+  ];
+
+  for (const { key, label } of booleanArgs) {
+    if (config[key] !== undefined) {
+      try {
+        parseOptionalBoolean(config[key], label);
+      } catch (err: any) {
+        errors.push(err?.message || `${label} has an invalid value`);
+      }
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error('Configuration error:\n' + errors.join('\n'));
   }
@@ -112,6 +177,47 @@ function validateConfig(config: Record<string, string>) {
 if (isCliEnabled) {
   validateConfig(argvConfig);
 }
+
+const transportRaw = getArgValue(argvConfig, 'transport', 'mode');
+const httpFlagRaw = getArgValue(argvConfig, 'http', 'httpEnabled', 'enableHttp');
+const disableStdioRaw = getArgValue(argvConfig, 'disableStdio', 'stdioDisabled', 'noStdio');
+const httpPortRaw = getArgValue(argvConfig, 'httpPort', 'http-port');
+const httpHostRaw = getArgValue(argvConfig, 'httpHost', 'http-host');
+
+const parsedHttpFlag = parseOptionalBoolean(httpFlagRaw, '--http');
+const parsedDisableStdio = parseOptionalBoolean(disableStdioRaw, '--disableStdio');
+
+const TRANSPORT_MODE: 'stdio' | 'http' = (() => {
+  if (transportRaw) {
+    const normalized = transportRaw.toLowerCase();
+    if (normalized === 'http' || normalized === 'stdio') {
+      return normalized;
+    }
+  }
+
+  if (parsedDisableStdio === true) {
+    return 'http';
+  }
+
+  if (parsedHttpFlag === true) {
+    return 'http';
+  }
+
+  if (httpPortRaw !== undefined) {
+    return 'http';
+  }
+
+  return 'stdio';
+})();
+
+const HTTP_PORT = (() => {
+  if (httpPortRaw !== undefined) {
+    return parseInt(httpPortRaw, 10);
+  }
+  return 3000;
+})();
+
+const HTTP_HOST = httpHostRaw ?? '0.0.0.0';
 
 // Command sanitization and validation
 export function sanitizeCommand(command: string): string {
@@ -1119,21 +1225,104 @@ export async function execSshCommand(
 }
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("SSH MCP Server running on stdio");
+  let stdioTransport: StdioServerTransport | null = null;
+  let httpTransport: StreamableHTTPServerTransport | null = null;
+  let httpServer: ReturnType<typeof createServer> | null = null;
+  let isCleaningUp = false;
+  let httpTransportClosed = false;
 
-  // Handle graceful shutdown
+  if (TRANSPORT_MODE === 'http') {
+    httpTransport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+
+    await server.connect(httpTransport);
+
+    httpServer = createServer((req, res) => {
+      httpTransport!.handleRequest(req as any, res).catch((error) => {
+        console.error("Error handling HTTP request:", error);
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.end('Internal Server Error');
+        } else {
+          try {
+            res.end();
+          } catch {
+            // ignore errors while attempting to end the response
+          }
+        }
+      });
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      if (!httpServer) {
+        reject(new Error('HTTP server was not created'));
+        return;
+      }
+
+      const initialErrorListener = (error: Error) => {
+        reject(error);
+      };
+
+      httpServer.on('error', initialErrorListener);
+      httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+        httpServer?.off('error', initialErrorListener);
+        httpServer?.on('error', (error) => {
+          console.error("HTTP server error:", error);
+        });
+
+        const address = httpServer?.address();
+        if (address && typeof address === 'object') {
+          const host = address.address === '::' ? 'localhost' : address.address;
+          console.error(`SSH MCP Server running over HTTP on http://${host}:${address.port}`);
+        } else {
+          console.error(`SSH MCP Server running over HTTP on port ${HTTP_PORT}`);
+        }
+        resolve();
+      });
+    });
+  } else {
+    stdioTransport = new StdioServerTransport();
+    await server.connect(stdioTransport);
+    console.error("SSH MCP Server running on stdio");
+  }
+
   const cleanup = () => {
+    if (isCleaningUp) {
+      return;
+    }
+    isCleaningUp = true;
+
     console.error("Shutting down SSH MCP Server...");
     closeAllConnectionManagers();
-    process.exit(0);
+
+    if (httpTransport && httpServer) {
+      httpTransportClosed = true;
+      httpTransport.close().catch((error) => {
+        console.error("Error closing HTTP transport:", error);
+      }).finally(() => {
+        httpServer?.close((err) => {
+          if (err) {
+            console.error("Error closing HTTP server:", err);
+          }
+          process.exit(0);
+        });
+      });
+    } else {
+      process.exit(0);
+    }
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
   process.on('exit', () => {
     closeAllConnectionManagers();
+    if (httpTransport && !httpTransportClosed) {
+      httpTransport.close().catch((error) => {
+        console.error("Error closing HTTP transport during exit:", error);
+      });
+    }
   });
 }
 

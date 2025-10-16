@@ -150,6 +150,21 @@ For a locally modified checkout (e.g. this repo under `/tmp/ssh-mcp`), build it 
 
 If you prefer to choose the destination dynamically, you can omit `--host` (and even `--user`) from the CLI arguments and provide those fields in each `exec` tool call instead.
 
+### HTTP Transport (Optional)
+
+Prefer to expose the server over the network instead of stdio? Launch it in HTTP mode:
+
+```bash
+node build/index.js --transport=http --httpPort=8080
+```
+
+- Default listener is `http://0.0.0.0:3000/` when `--httpPort` is omitted.
+- Use `--httpHost` to bind to a specific interface (for example `--httpHost=127.0.0.1`).
+- You can also toggle HTTP mode with `--http=true` or `--disableStdio=true` if you want to keep legacy scripts unchanged.
+- HTTP requests follow the MCP Streamable HTTP transport: issue `POST` requests with JSON-RPC bodies to the root path. Server responses are plain JSON (no authentication, no SSE) for maximum simplicity.
+
+Stdio remains the default transport, so existing MCP client configurations continue to work unchanged.
+
 ### Proxy / Bastion Support
 
 Provide `--proxyHost`, `--proxyPort`, and `--proxyUser` when starting the MCP server to route every connection through a fixed jump host. The server reuses the same SSH agent, password, or key material you supply for the proxy, and tool calls can optionally override those settings with the `proxyJump` object.
